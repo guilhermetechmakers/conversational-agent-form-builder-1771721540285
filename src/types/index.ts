@@ -13,6 +13,15 @@ export interface FieldOption {
   value: string
 }
 
+export interface FieldValidation {
+  minLength?: number
+  maxLength?: number
+  min?: number
+  max?: number
+  pattern?: string
+  patternMessage?: string
+}
+
 export interface AgentField {
   id: string
   type: FieldType
@@ -20,9 +29,12 @@ export interface AgentField {
   label: string
   required: boolean
   placeholder?: string
+  sampleData?: string
   options?: FieldOption[]
-  validation?: Record<string, unknown>
+  validation?: FieldValidation
 }
+
+export type AgentTone = 'formal' | 'friendly' | 'sales-y'
 
 export interface Agent {
   id: string
@@ -32,22 +44,25 @@ export interface Agent {
   tags?: string[]
   fields: AgentField[]
   persona?: {
-    tone?: string
+    tone?: AgentTone
     systemInstructions?: string
     avatarUrl?: string
   }
   appearance?: {
     primaryColor?: string
     accentColor?: string
+    theme?: 'light' | 'dark'
     logoUrl?: string
   }
   context?: {
     faq?: string
     fileUrls?: string[]
     docUrls?: string[]
+    productDocUrl?: string
   }
   advanced?: {
     webhookUrls?: string[]
+    passcodeEnabled?: boolean
     passcode?: string
     rateLimit?: number
     retentionDays?: number
@@ -55,6 +70,38 @@ export interface Agent {
   status: 'draft' | 'published'
   createdAt: string
   updatedAt: string
+}
+
+export interface AgentBuilderFormState {
+  name: string
+  slug: string
+  description: string
+  tags: string[]
+  fields: AgentField[]
+  persona: {
+    tone: AgentTone
+    systemInstructions: string
+    avatarUrl: string
+  }
+  appearance: {
+    primaryColor: string
+    accentColor: string
+    theme: 'light' | 'dark'
+    logoUrl: string
+  }
+  context: {
+    faq: string
+    fileUrls: string[]
+    docUrls: string[]
+    productDocUrl: string
+  }
+  advanced: {
+    webhookUrls: string[]
+    passcodeEnabled: boolean
+    passcode: string
+    rateLimit: number
+    retentionDays: number
+  }
 }
 
 export interface Message {
@@ -86,4 +133,14 @@ export interface Session {
   }
   createdAt: string
   updatedAt: string
+}
+
+export interface AgentPublicChat {
+  id: string
+  user_id: string
+  title: string
+  description?: string
+  status: string
+  created_at: string
+  updated_at: string
 }

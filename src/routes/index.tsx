@@ -9,6 +9,7 @@ import { SessionViewerPage } from '@/pages/dashboard/session-viewer-page'
 import { SettingsPage } from '@/pages/dashboard/settings-page'
 import { AnalyticsPage } from '@/pages/dashboard/analytics-page'
 import { PublicChatPage } from '@/pages/chat/public-chat-page'
+import AgentPublicChat from '@/pages/AgentPublicChat'
 import { LoginPage } from '@/pages/auth/login-page'
 import { SignupPage } from '@/pages/auth/signup-page'
 import { ForgotPasswordPage } from '@/pages/auth/forgot-password-page'
@@ -26,6 +27,8 @@ const router = createBrowserRouter([
   { path: '/terms', element: <Navigate to="/legal/terms" replace /> },
   { path: '/legal/:type', element: <LegalPage /> },
   { path: '/chat/:slug', element: <PublicChatPage /> },
+  { path: '/agent-public-chat', element: <AgentPublicChat /> },
+  { path: '/agent-public-chat/:slug', element: <AgentPublicChat /> },
   {
     path: '/dashboard',
     element: <DashboardLayout />,

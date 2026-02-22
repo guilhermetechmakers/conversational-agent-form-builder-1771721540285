@@ -27,7 +27,7 @@ export function LandingPage() {
                   <ArrowRight className="h-4 w-4" />
                 </Button>
               </Link>
-              <Link to="/chat/lead-capture">
+              <Link to="/agent-public-chat/lead-capture">
                 <Button variant="outline" size="lg" className="gap-2">
                   Try Demo Agent
                 </Button>

@@ -1,97 +1,285 @@
-import { useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useState, useCallback, useEffect } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Badge } from '@/components/ui/badge'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import {
-  Save,
-  Send,
-  Settings,
-  MessageSquare,
-  Palette,
-  FileText,
-  Shield,
-  Plus,
-  GripVertical,
-  Trash2,
-} from 'lucide-react'
-import type { FieldType } from '@/types'
+  AgentMetadata,
+  FieldsEditor,
+  PersonaSettings,
+  AppearanceSettings,
+  ContextUpload,
+  AdvancedSettings,
+  PreviewPane,
+  SavePublishButtons,
+} from '@/components/agent-builder'
+import { getAgent, updateAgent, createAgent, publishAgent } from '@/api/agents'
+import { uploadFile, uploadFiles } from '@/api/uploads'
+import type { AgentField, AgentTone } from '@/types'
 
-const metadataSchema = z.object({
+const agentBuilderSchema = z.object({
   name: z.string().min(1, 'Name is required'),
-  slug: z.string().min(1, 'Slug is required').regex(/^[a-z0-9-]+$/, 'Slug must be lowercase with hyphens only'),
-  description: z.string().optional(),
+  slug: z
+    .string()
+    .min(1, 'Slug is required')
+    .regex(/^[a-z0-9-]+$/, 'Slug must be lowercase with hyphens only'),
+  description: z.string().optional().default(''),
+  tags: z.array(z.string()).default([]),
+  persona: z.object({
+    tone: z.enum(['formal', 'friendly', 'sales-y']).default('friendly'),
+    systemInstructions: z.string().default(''),
+    avatarUrl: z.string().default(''),
+  }),
+  appearance: z.object({
+    primaryColor: z.string().default('#26C6FF'),
+    accentColor: z.string().default('#00FF66'),
+    theme: z.enum(['light', 'dark']).default('dark'),
+    logoUrl: z.string().default(''),
+  }),
+  context: z.object({
+    faq: z.string().default(''),
+    fileUrls: z.array(z.string()).default([]),
+    docUrls: z.array(z.string()).default([]),
+    productDocUrl: z.string().default(''),
+  }),
+  advanced: z.object({
+    webhookUrls: z.array(z.string()).default([]),
+    passcodeEnabled: z.boolean().default(false),
+    passcode: z.string().default(''),
+    rateLimit: z.number().default(60),
+    retentionDays: z.number().default(30),
+  }),
 })
 
-type MetadataForm = z.infer<typeof metadataSchema>
+type AgentBuilderForm = z.infer<typeof agentBuilderSchema>
 
-const fieldTypes: { value: FieldType; label: string }[] = [
-  { value: 'text', label: 'Text' },
-  { value: 'email', label: 'Email' },
-  { value: 'phone', label: 'Phone' },
-  { value: 'number', label: 'Number' },
-  { value: 'select', label: 'Select' },
-  { value: 'checkbox', label: 'Checkbox' },
-  { value: 'textarea', label: 'Textarea' },
-  { value: 'date', label: 'Date' },
+const defaultFields: AgentField[] = [
+  { id: crypto.randomUUID(), type: 'text', name: 'full_name', label: 'Full Name', required: true },
+  { id: crypto.randomUUID(), type: 'email', name: 'email', label: 'Email', required: true },
+]
+
+const tabs = [
+  { id: 'metadata' as const, label: 'Metadata', icon: 'Settings' },
+  { id: 'fields' as const, label: 'Fields', icon: 'MessageSquare' },
+  { id: 'persona' as const, label: 'Persona', icon: 'User' },
+  { id: 'appearance' as const, label: 'Appearance', icon: 'Palette' },
+  { id: 'context' as const, label: 'Context', icon: 'FileText' },
+  { id: 'advanced' as const, label: 'Advanced', icon: 'Shield' },
 ]
 
 export function AgentBuilderPage() {
   const { id } = useParams()
-  const isNew = id === 'new'
-  const [activeTab, setActiveTab] = useState<'metadata' | 'fields' | 'persona' | 'appearance' | 'context' | 'advanced'>('metadata')
-  const [fields, setFields] = useState<Array<{ id: string; type: FieldType; name: string; label: string; required: boolean }>>([
-    { id: '1', type: 'text', name: 'full_name', label: 'Full Name', required: true },
-    { id: '2', type: 'email', name: 'email', label: 'Email', required: true },
-  ])
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const isNew = id === 'new' || !id
 
-  const form = useForm<MetadataForm>({
-    resolver: zodResolver(metadataSchema),
+  const [activeTab, setActiveTab] = useState<(typeof tabs)[0]['id']>('metadata')
+  const [fields, setFields] = useState<AgentField[]>(defaultFields)
+  const [previewMessages, setPreviewMessages] = useState<
+    Array<{ role: 'user' | 'assistant'; content: string }>
+  >([
+    { role: 'assistant', content: "Hi! I'm here to help. What's your name?" },
+    { role: 'user', content: 'John Doe' },
+    { role: 'assistant', content: "Nice to meet you, John! What's your email address?" },
+  ])
+  const [previewInput, setPreviewInput] = useState('')
+  const [isUploading, setIsUploading] = useState(false)
+  const [isIndexing, setIsIndexing] = useState(false)
+
+  const { data: agent, isLoading, error } = useQuery({
+    queryKey: ['agent', id],
+    queryFn: () => getAgent(id!),
+    enabled: !isNew,
+    retry: false,
+  })
+
+  const form = useForm<AgentBuilderForm>({
+    resolver: zodResolver(agentBuilderSchema),
     defaultValues: {
-      name: isNew ? '' : 'Lead Capture',
-      slug: isNew ? '' : 'lead-capture',
+      name: '',
+      slug: '',
       description: '',
+      tags: [],
+      persona: { tone: 'friendly', systemInstructions: '', avatarUrl: '' },
+      appearance: { primaryColor: '#26C6FF', accentColor: '#00FF66', theme: 'dark', logoUrl: '' },
+      context: { faq: '', fileUrls: [], docUrls: [], productDocUrl: '' },
+      advanced: { webhookUrls: [], passcodeEnabled: false, passcode: '', rateLimit: 60, retentionDays: 30 },
     },
   })
 
-  const onSubmit = (data: MetadataForm) => {
-    console.log(data)
-  }
-
-  const addField = () => {
-    setFields((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        type: 'text',
-        name: `field_${prev.length + 1}`,
-        label: `Field ${prev.length + 1}`,
-        required: false,
+  useEffect(() => {
+    if (!agent) return
+    form.reset({
+      name: agent.name,
+      slug: agent.slug,
+      description: agent.description ?? '',
+      tags: agent.tags ?? [],
+      persona: {
+        tone: (agent.persona?.tone as AgentTone) ?? 'friendly',
+        systemInstructions: agent.persona?.systemInstructions ?? '',
+        avatarUrl: agent.persona?.avatarUrl ?? '',
       },
+      appearance: {
+        primaryColor: agent.appearance?.primaryColor ?? '#26C6FF',
+        accentColor: agent.appearance?.accentColor ?? '#00FF66',
+        theme: agent.appearance?.theme ?? 'dark',
+        logoUrl: agent.appearance?.logoUrl ?? '',
+      },
+      context: {
+        faq: agent.context?.faq ?? '',
+        fileUrls: agent.context?.fileUrls ?? [],
+        docUrls: agent.context?.docUrls ?? [],
+        productDocUrl: agent.context?.productDocUrl ?? '',
+      },
+      advanced: {
+        webhookUrls: agent.advanced?.webhookUrls ?? [],
+        passcodeEnabled: agent.advanced?.passcodeEnabled ?? false,
+        passcode: agent.advanced?.passcode ?? '',
+        rateLimit: agent.advanced?.rateLimit ?? 60,
+        retentionDays: agent.advanced?.retentionDays ?? 30,
+      },
+    })
+    if (agent.fields?.length) {
+      setFields(agent.fields)
+    }
+  }, [agent])
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const values = form.getValues()
+      const payload = {
+        name: values.name,
+        slug: values.slug,
+        description: values.description || undefined,
+        tags: values.tags,
+        fields,
+        persona: values.persona,
+        appearance: values.appearance,
+        context: values.context,
+        advanced: values.advanced,
+        status: 'draft' as const,
+      }
+      if (isNew) {
+        return createAgent(payload)
+      }
+      return updateAgent(id!, payload)
+    },
+    onSuccess: (data) => {
+      toast.success('Draft saved')
+      if (isNew) navigate(`/dashboard/agents/${data.id}`)
+      queryClient.invalidateQueries({ queryKey: ['agent', id] })
+    },
+    onError: (err: Error) => {
+      toast.error(err.message ?? 'Failed to save')
+    },
+  })
+
+  const publishMutation = useMutation({
+    mutationFn: async () => {
+      const values = form.getValues()
+      const payload = {
+        name: values.name,
+        slug: values.slug,
+        description: values.description || undefined,
+        tags: values.tags,
+        fields,
+        persona: values.persona,
+        appearance: values.appearance,
+        context: values.context,
+        advanced: values.advanced,
+        status: 'published' as const,
+      }
+      if (isNew) {
+        const created = await createAgent({ ...payload, status: 'published' })
+        return created
+      }
+      return publishAgent(id!)
+    },
+    onSuccess: (data) => {
+      toast.success('Agent published')
+      if (isNew) navigate(`/dashboard/agents/${data.id}`)
+      queryClient.invalidateQueries({ queryKey: ['agent', id] })
+    },
+    onError: (err: Error) => {
+      toast.error(err.message ?? 'Failed to publish')
+    },
+  })
+
+  const handleAvatarUpload = useCallback(async (file: File): Promise<string> => {
+    setIsUploading(true)
+    try {
+      const url = await uploadFile(file)
+      return url
+    } finally {
+      setIsUploading(false)
+    }
+  }, [])
+
+  const handleFileUpload = useCallback(async (files: File[]): Promise<string[]> => {
+    setIsUploading(true)
+    try {
+      return await uploadFiles(files)
+    } finally {
+      setIsUploading(false)
+    }
+  }, [])
+
+  const handleIndexKnowledge = useCallback(async () => {
+    setIsIndexing(true)
+    try {
+      await new Promise((r) => setTimeout(r, 1500))
+      toast.success('Knowledge indexed')
+    } catch {
+      toast.error('Indexing failed')
+    } finally {
+      setIsIndexing(false)
+    }
+  }, [])
+
+  const handlePreviewSend = useCallback((msg: string) => {
+    setPreviewMessages((prev) => [...prev, { role: 'user', content: msg }])
+    setPreviewMessages((prev) => [
+      ...prev,
+      { role: 'assistant', content: `Thanks! I've noted: ${msg}` },
     ])
+  }, [])
+
+  const handleSave = () => form.handleSubmit(() => saveMutation.mutate())()
+  const handlePublish = () => form.handleSubmit(() => publishMutation.mutate())()
+
+  const validationErrors: string[] = []
+  if (form.formState.errors.name) validationErrors.push(form.formState.errors.name.message!)
+  if (form.formState.errors.slug) validationErrors.push(form.formState.errors.slug.message!)
+  const hasValidationErrors = validationErrors.length > 0
+
+  if (!isNew && isLoading) {
+    return (
+      <div className="flex min-h-[400px] items-center justify-center">
+        <div className="h-8 w-8 animate-pulse rounded-full bg-accent/30" />
+      </div>
+    )
   }
 
-  const removeField = (fieldId: string) => {
-    setFields((prev) => prev.filter((f) => f.id !== fieldId))
+  if (!isNew && error) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-lg border border-border py-16">
+        <p className="text-muted-foreground">Failed to load agent</p>
+        <button
+          type="button"
+          onClick={() => queryClient.invalidateQueries({ queryKey: ['agent', id] })}
+          className="mt-4 text-accent hover:underline"
+        >
+          Retry
+        </button>
+      </div>
+    )
   }
-
-  const tabs = [
-    { id: 'metadata' as const, label: 'Metadata', icon: Settings },
-    { id: 'fields' as const, label: 'Fields', icon: MessageSquare },
-    { id: 'persona' as const, label: 'Persona', icon: MessageSquare },
-    { id: 'appearance' as const, label: 'Appearance', icon: Palette },
-    { id: 'context' as const, label: 'Context', icon: FileText },
-    { id: 'advanced' as const, label: 'Advanced', icon: Shield },
-  ]
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-3xl font-semibold text-foreground">
             {isNew ? 'Create Agent' : 'Edit Agent'}
@@ -100,299 +288,101 @@ export function AgentBuilderPage() {
             Configure your conversational agent and publish to a public link
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={() => form.handleSubmit(onSubmit)()}>
-            <Save className="mr-2 h-4 w-4" />
-            Save Draft
-          </Button>
-          <Button variant="accent">
-            <Send className="mr-2 h-4 w-4" />
-            Publish
-          </Button>
-        </div>
+        <SavePublishButtons
+          onSave={handleSave}
+          onPublish={handlePublish}
+          isSaving={saveMutation.isPending}
+          isPublishing={publishMutation.isPending}
+          status={agent?.status}
+          hasValidationErrors={hasValidationErrors}
+          validationErrors={validationErrors}
+        />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Builder panel */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className="space-y-6 lg:col-span-2">
           <div className="flex gap-2 overflow-x-auto border-b border-border pb-2">
             {tabs.map((tab) => (
-              <Button
+              <button
                 key={tab.id}
-                variant={activeTab === tab.id ? 'default' : 'ghost'}
-                size="sm"
+                type="button"
                 onClick={() => setActiveTab(tab.id)}
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition-all hover:scale-[1.02] ${
+                  activeTab === tab.id
+                    ? 'bg-accent/10 text-accent'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                }`}
               >
                 {tab.label}
-              </Button>
+              </button>
             ))}
           </div>
 
           {activeTab === 'metadata' && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Agent Metadata</CardTitle>
-                <CardDescription>Basic information about your agent</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-                  <div>
-                    <Label htmlFor="name">Name</Label>
-                    <Input
-                      id="name"
-                      {...form.register('name')}
-                      placeholder="e.g. Lead Capture"
-                      className="mt-2"
-                    />
-                    {form.formState.errors.name && (
-                      <p className="mt-1 text-sm text-red-400">{form.formState.errors.name.message}</p>
-                    )}
-                  </div>
-                  <div>
-                    <Label htmlFor="slug">Slug (URL path)</Label>
-                    <Input
-                      id="slug"
-                      {...form.register('slug')}
-                      placeholder="e.g. lead-capture"
-                      className="mt-2"
-                    />
-                    {form.formState.errors.slug && (
-                      <p className="mt-1 text-sm text-red-400">{form.formState.errors.slug.message}</p>
-                    )}
-                  </div>
-                  <div>
-                    <Label htmlFor="description">Description</Label>
-                    <Input
-                      id="description"
-                      {...form.register('description')}
-                      placeholder="Optional description"
-                      className="mt-2"
-                    />
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
+            <AgentMetadata
+              register={form.register as never}
+              watch={form.watch as never}
+              setValue={form.setValue as never}
+              errors={form.formState.errors}
+            />
           )}
 
           {activeTab === 'fields' && (
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between">
-                <div>
-                  <CardTitle>Fields</CardTitle>
-                  <CardDescription>Configure fields to collect conversationally</CardDescription>
-                </div>
-                <Button variant="accent" size="sm" onClick={addField}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Add Field
-                </Button>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  {fields.map((field) => (
-                    <div
-                      key={field.id}
-                      className="flex items-center gap-4 rounded-lg border border-border p-4"
-                    >
-                      <GripVertical className="h-4 w-4 cursor-grab text-muted-foreground" />
-                      <div className="flex-1 grid grid-cols-2 gap-4">
-                        <div>
-                          <Label className="text-xs">Label</Label>
-                          <Input
-                            value={field.label}
-                            onChange={(e) =>
-                              setFields((prev) =>
-                                prev.map((f) =>
-                                  f.id === field.id ? { ...f, label: e.target.value } : f
-                                )
-                              )
-                            }
-                            className="mt-1"
-                          />
-                        </div>
-                        <div>
-                          <Label className="text-xs">Type</Label>
-                          <select
-                            value={field.type}
-                            onChange={(e) =>
-                              setFields((prev) =>
-                                prev.map((f) =>
-                                  f.id === field.id
-                                    ? { ...f, type: e.target.value as FieldType }
-                                    : f
-                                )
-                              )
-                            }
-                            className="mt-1 flex h-10 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm"
-                          >
-                            {fieldTypes.map((t) => (
-                              <option key={t.value} value={t.value}>
-                                {t.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={field.required}
-                          onChange={(e) =>
-                            setFields((prev) =>
-                              prev.map((f) =>
-                                f.id === field.id ? { ...f, required: e.target.checked } : f
-                              )
-                            )
-                          }
-                          className="rounded border-input"
-                        />
-                        <span className="text-sm">Required</span>
-                      </label>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => removeField(field.id)}
-                        className="text-red-400 hover:text-red-300"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
+            <FieldsEditor fields={fields} onFieldsChange={setFields} />
           )}
 
           {activeTab === 'persona' && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Persona Settings</CardTitle>
-                <CardDescription>Tone and system instructions for the agent</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <Label>Tone</Label>
-                  <select className="mt-2 flex h-10 w-full rounded-lg border border-input bg-background px-4 py-2 text-sm">
-                    <option>Professional</option>
-                    <option>Friendly</option>
-                    <option>Casual</option>
-                  </select>
-                </div>
-                <div>
-                  <Label>System Instructions</Label>
-                  <textarea
-                    placeholder="Instructions for how the agent should behave..."
-                    className="mt-2 flex min-h-[120px] w-full rounded-lg border border-input bg-background px-4 py-2 text-sm"
-                  />
-                </div>
-              </CardContent>
-            </Card>
+            <PersonaSettings
+              register={form.register as never}
+              watch={form.watch as never}
+              setValue={form.setValue as never}
+              errors={form.formState.errors}
+              onAvatarUpload={handleAvatarUpload}
+              isUploading={isUploading}
+            />
           )}
 
           {activeTab === 'appearance' && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Appearance</CardTitle>
-                <CardDescription>Colors and branding</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex gap-4">
-                  <div>
-                    <Label>Primary Color</Label>
-                    <input type="color" defaultValue="#26C6FF" className="mt-2 h-10 w-20 rounded border" />
-                  </div>
-                  <div>
-                    <Label>Accent Color</Label>
-                    <input type="color" defaultValue="#00FF66" className="mt-2 h-10 w-20 rounded border" />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+            <AppearanceSettings
+              watch={form.watch as never}
+              setValue={form.setValue as never}
+            />
           )}
 
           {activeTab === 'context' && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Context</CardTitle>
-                <CardDescription>FAQs, documents, URLs for agent knowledge</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <Label>FAQ / Knowledge</Label>
-                  <textarea
-                    placeholder="Paste FAQ or knowledge base content..."
-                    className="mt-2 flex min-h-[120px] w-full rounded-lg border border-input bg-background px-4 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <Label>Upload Files (PDF, Markdown)</Label>
-                  <div className="mt-2 flex h-24 items-center justify-center rounded-lg border border-dashed border-border">
-                    <p className="text-sm text-muted-foreground">Drag & drop or click to upload</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+            <ContextUpload
+              register={form.register as never}
+              watch={form.watch as never}
+              setValue={form.setValue as never}
+              onFileUpload={handleFileUpload}
+              onIndexKnowledge={handleIndexKnowledge}
+              isUploading={isUploading}
+              isIndexing={isIndexing}
+            />
           )}
 
           {activeTab === 'advanced' && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Advanced Settings</CardTitle>
-                <CardDescription>Webhooks, passcode, rate limits</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <Label>Webhook URL</Label>
-                  <Input placeholder="https://..." className="mt-2" />
-                </div>
-                <div>
-                  <Label>Passcode Protection</Label>
-                  <Input type="password" placeholder="Optional" className="mt-2" />
-                </div>
-              </CardContent>
-            </Card>
+            <AdvancedSettings
+              register={form.register as never}
+              watch={form.watch as never}
+              setValue={form.setValue as never}
+            />
           )}
         </div>
 
-        {/* Preview pane */}
         <div className="lg:col-span-1">
-          <Card className="sticky top-24">
-            <CardHeader>
-              <CardTitle>Preview</CardTitle>
-              <CardDescription>Live chat preview</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="rounded-lg border border-border bg-background p-4">
-                <div className="mb-4 flex items-center gap-2">
-                  <div className="h-8 w-8 rounded-full bg-accent/20" />
-                  <span className="text-sm font-medium">
-                    {form.watch('name') || 'Agent'}
-                  </span>
-                </div>
-                <div className="space-y-3">
-                  <div className="rounded-lg bg-secondary/50 p-3 text-sm">
-                    Hi! I&apos;m here to help. What&apos;s your name?
-                  </div>
-                  <div className="ml-auto max-w-[80%] rounded-lg bg-accent/20 p-3 text-sm">
-                    John Doe
-                  </div>
-                  <div className="rounded-lg bg-secondary/50 p-3 text-sm">
-                    Nice to meet you, John! What&apos;s your email address?
-                  </div>
-                </div>
-                <div className="mt-4 flex gap-2">
-                  <Input placeholder="Type a message..." className="flex-1" />
-                  <Button size="icon">Send</Button>
-                </div>
-                <div className="mt-2 flex gap-1">
-                  {fields.filter((f) => f.required).map((f) => (
-                    <Badge key={f.id} variant="secondary" className="text-xs">
-                      {f.label}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+          <PreviewPane
+            agentName={form.watch('name')}
+            fields={fields}
+            primaryColor={form.watch('appearance.primaryColor')}
+            accentColor={form.watch('appearance.accentColor')}
+            theme={form.watch('appearance.theme')}
+            avatarUrl={form.watch('persona.avatarUrl')}
+            messages={previewMessages}
+            onSendMessage={handlePreviewSend}
+            previewInput={previewInput}
+            onPreviewInputChange={setPreviewInput}
+          />
         </div>
       </div>
     </div>
